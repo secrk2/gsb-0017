@@ -1,0 +1,86 @@
+name: patent-cloud
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: patent-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      MYSQL_DATABASE: patent_cloud
+      TZ: Asia/Shanghai
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "3316:3306"   # 调试用，生产可删除
+    networks: [patent]
+
+  redis:
+    image: redis:7-alpine
+    container_name: patent-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "6383:6379"   # 调试用，生产可删除
+    networks: [patent]
+
+  backend:
+    build: ./backend
+    container_name: patent-backend
+    environment:
+      PORT: 7103
+      DB_DIALECT: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root123456}
+      DB_NAME: patent_cloud
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-patent-cloud-dev-secret-change-me}
+      SEED_ON_BOOT: "true"
+      FIRM_TZ: ${FIRM_TZ:-Asia/Shanghai}
+      TZ: Asia/Shanghai
+    ports:
+      - "7103:7103"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:7103/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    networks: [patent]
+
+  frontend:
+    build: ./frontend
+    container_name: patent-frontend
+    ports:
+      - "8103:80"     # Nginx：静态资源 + /api 反代到 backend:7103
+    depends_on:
+      backend:
+        condition: service_started
+    networks: [patent]
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  patent:
+    driver: bridge

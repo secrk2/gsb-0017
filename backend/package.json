@@ -1,0 +1,19 @@
+{
+  "name": "patent-cloud-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "专利云 · 案件全生命周期管理后端",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "DB_DIALECT=sqlite REDIS_URL=memory:// node src/index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "ioredis": "^5.4.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.12.0"
+  }
+}
