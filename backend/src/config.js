@@ -19,4 +19,8 @@ export const config = {
   // 代理所所在地时区：期限日期按此时区解释「今天/剩几天/是否逾期」。
   // 存储一律 UTC/日历日字符串，跨时区展示由前端按此时区换算。
   firmTz: process.env.FIRM_TZ || 'Asia/Shanghai',
+  // 撰稿附件原件对象存储：当前内置 local（compose 挂卷 / 本地 .objectstore 目录），
+  // 原件只存对象存储不入库；object_key 不可变，附件换版旧版仍可打开。s3 为预留 seam。
+  objectStoreDriver: process.env.OBJECT_STORE_DRIVER || 'local',
+  objectStoreDir: process.env.OBJECT_STORE_DIR || './.objectstore',
 }

@@ -51,7 +51,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:-patent-cloud-dev-secret-change-me}
       SEED_ON_BOOT: "true"
       FIRM_TZ: ${FIRM_TZ:-Asia/Shanghai}
+      OBJECT_STORE_DRIVER: local
+      OBJECT_STORE_DIR: /data/objectstore
       TZ: Asia/Shanghai
+    volumes:
+      - objectstore_data:/data/objectstore
     ports:
       - "7103:7103"
     depends_on:
@@ -80,6 +84,7 @@ services:
 volumes:
   mysql_data:
   redis_data:
+  objectstore_data:
 
 networks:
   patent:

@@ -12,3 +12,5 @@ coverage/
 *.log
 *.tsbuildinfo
 .DS_Store
+.objectstore/
+backend/.objectstore/

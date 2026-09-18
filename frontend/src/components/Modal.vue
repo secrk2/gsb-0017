@@ -1,6 +1,6 @@
 <template>
   <div class="modal-mask" @click.self="$emit('close')">
-    <div class="modal">
+    <div class="modal" :class="{ wide }">
       <div class="spread">
         <h3>{{ title }}</h3>
         <button class="link-btn" style="color: var(--muted)" @click="$emit('close')">✕</button>
@@ -11,6 +11,6 @@
 </template>
 
 <script setup>
-defineProps({ title: String })
+defineProps({ title: String, wide: Boolean })
 defineEmits(['close'])
 </script>

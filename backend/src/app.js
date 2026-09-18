@@ -12,10 +12,13 @@ import miscRoutes from './routes/misc.js'
 import logRoutes from './routes/logs.js'
 import syncRoutes from './routes/sync.js'
 import docRoutes from './routes/docs.js'
+import writingRoutes from './routes/writing.js'
 
 export function createApp() {
   const app = express()
   app.disable('x-powered-by')
+  // 撰稿附件原件直传对象存储：该路径按二进制收包（20MB），其余接口仍走 1MB JSON
+  app.use('/api/writing/attachments/upload', express.raw({ type: '*/*', limit: '20mb' }))
   app.use(express.json({ limit: '1mb' }))
 
   app.get('/api/health', async (_req, res) => {
@@ -43,6 +46,7 @@ export function createApp() {
   app.use('/api/logs', logRoutes)
   app.use('/api/sync', syncRoutes)
   app.use('/api', docRoutes)
+  app.use('/api', writingRoutes)
 
   app.use('/api', (_req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: '接口不存在' } }))
   app.use(errorHandler)

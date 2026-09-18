@@ -51,6 +51,24 @@
         <CompletionMeter :completion="c.completion" v-model:basis="completionBasis" />
       </div>
 
+      <!-- 撰稿：交底书 / 权利要求草稿 / 说明书定稿（统一版本链） -->
+      <div class="card mt16">
+        <div class="spread">
+          <h3 style="margin: 0">撰稿</h3>
+          <router-link class="btn sm primary" :to="`/cases/${id}/writing`">进入撰稿工作台 →</router-link>
+        </div>
+        <div class="grid grid-2 mt16" v-if="writing">
+          <div v-for="k in writingKinds" :key="k.key" class="writing-mini">
+            <div class="spread">
+              <strong>{{ k.label }}</strong>
+              <span class="chip" :class="writingChip(k.key)">{{ writingStateText(k.key) }}</span>
+            </div>
+            <p class="small muted mt8" style="margin-bottom: 0">{{ writingHint(k.key) }}</p>
+          </div>
+        </div>
+        <p v-else class="muted small mt8">撰稿状态加载中…</p>
+      </div>
+
       <!-- 官文与期限 -->
       <div class="grid grid-2 mt16">
         <!-- 官文 -->
@@ -351,6 +369,34 @@ function blankDeadline() {
 const activeDocs = computed(() => (c.value?.docs || []).filter((d) => d.status !== '已撤回'))
 const manualOverdue = computed(() => Boolean(deadlineForm.value.due_date && c.value && deadlineForm.value.due_date < c.value.completion.server_today))
 
+// 撰稿三态摘要
+const writing = ref(null)
+const writingKinds = [
+  { key: 'disclosure', label: '技术交底书' },
+  { key: 'claims', label: '权利要求草稿' },
+  { key: 'specification', label: '说明书定稿' },
+]
+async function loadWriting() {
+  try {
+    writing.value = (await get(`/cases/${id}/writing`)).data
+  } catch { writing.value = null }
+}
+function writingStateText(key) {
+  return ({ none: '无草稿', void: '草稿全部作废', parsing: '附件解析中', active: '在办' })[writing.value?.kinds[key]?.state] || '—'
+}
+function writingChip(key) {
+  return ({ none: '', void: 'bad', parsing: 'warn', active: 'ok' })[writing.value?.kinds[key]?.state] || ''
+}
+function writingHint(key) {
+  const k = writing.value?.kinds[key]
+  if (!k) return ''
+  if (k.state === 'none') return '尚未开始；可在工作台新建草稿链。'
+  if (k.state === 'void') return `${k.voided_count} 条草稿链已作废，可回到任一历史版本重开。`
+  if (k.state === 'parsing') return '原件已上传仍在解析，正文尚未起草。'
+  const d = k.doc
+  return `${d.status} · 当前 v${d.current_version}${d.status === '已定稿' ? '（定稿提交期限见上方期限列表）' : ''}`
+}
+
 const isAllowed = (s) => c.value?.allowed_transitions?.some((t) => t.to === s)
 
 async function load() {
@@ -359,6 +405,7 @@ async function load() {
     c.value = r.data
     stale.value = r.stale
     cachedAt.value = r.cachedAt
+    loadWriting()
   } catch (e) {
     // 空态一：加载失败（与「无官文/全撤回」完全分开，由 ErrorState 呈现）
     error.value = e.message

@@ -8,6 +8,7 @@ const routes = [
   { path: '/clients/:id', component: () => import('./views/ClientDetailView.vue'), meta: { auth: true } },
   { path: '/cases', component: () => import('./views/CasesView.vue'), meta: { auth: true } },
   { path: '/cases/:id', component: () => import('./views/CaseDetailView.vue'), meta: { auth: true } },
+  { path: '/cases/:id/writing', component: () => import('./views/WritingView.vue'), meta: { auth: true } },
   { path: '/calendar', component: () => import('./views/CalendarView.vue'), meta: { auth: true } },
   { path: '/logs', component: () => import('./views/LogsView.vue'), meta: { auth: true, roles: ['admin', 'reviewer'] } },
   { path: '/403', component: () => import('./views/ForbiddenView.vue') },

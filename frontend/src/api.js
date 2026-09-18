@@ -125,3 +125,40 @@ export async function downloadText(path, filename) {
   a.remove()
   URL.revokeObjectURL(url)
 }
+
+// 撰稿附件两阶段上传的第二阶段：二进制直传对象存储（带一次性上传令牌）
+export async function uploadBinary(path, buf, uploadToken, contentType = 'application/octet-stream') {
+  let resp
+  try {
+    resp = await fetch(`/api${path}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${store.token}`, 'X-Upload-Token': uploadToken, 'Content-Type': contentType },
+      body: buf,
+    })
+  } catch {
+    throw new ApiError(0, 'NETWORK', '网络连接失败')
+  }
+  const json = await resp.json().catch(() => null)
+  if (!resp.ok) throw new ApiError(resp.status, json?.error?.code || 'UPLOAD_FAILED', json?.error?.message || `上传失败（${resp.status}）`)
+  return json.data
+}
+
+// 带认证的附件下载：按响应头文件名保存为本地文件
+export async function downloadBinary(path, fallbackName = 'attachment') {
+  const resp = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${store.token}` } })
+  if (!resp.ok) {
+    const j = await resp.json().catch(() => null)
+    throw new ApiError(resp.status, j?.error?.code || 'DOWNLOAD_FAILED', j?.error?.message || `下载失败（${resp.status}）`)
+  }
+  const blob = await resp.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  const cd = resp.headers.get('Content-Disposition') || ''
+  const m = /filename\*=UTF-8''([^;]+)/.exec(cd)
+  a.download = m ? decodeURIComponent(m[1]) : fallbackName
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}

@@ -4,6 +4,9 @@ import { config } from './config.js'
 import { nowIso, daysFromNow, addDays, tzToday } from './lib/dates.js'
 import { docTypeDef } from './lib/docTypes.js'
 import { computeDueDate } from './lib/deadlineCalc.js'
+import { DEFAULT_RULES } from './lib/docMask.js'
+import { DOC_KINDS } from './lib/writing.js'
+import { buildObjectKey, putObject } from './services/objectStore.js'
 
 // 首次启动（users 表为空）时写入演示业务数据：
 // 3 家委托客户、账号、覆盖全部状态的案件、2026 法定节假日、
@@ -277,8 +280,191 @@ export async function seedIfEmpty() {
         caseId, kind, amount, daysFromNow(due), paid ? '已缴' : '待缴', paid ? daysAgoIso(Math.abs(due) + 2) : null, daysAgoIso(30),
       ])
     }
+
+    // ---- 撰稿：交底书 / 权利要求草稿 / 说明书定稿（三类共用版本链）----
+    const maskSnapshot = JSON.stringify({ version: 1, ...DEFAULT_RULES })
+    await d.insert('INSERT INTO mask_rules (version, rules_json, is_active, created_by, created_at, note) VALUES (?,?,1,?,?,?)',
+      [1, maskSnapshot, 1, now, '首版：隐藏在先引用章节；温度/配比/压力参数与文献号句内遮蔽'])
+
+    // 按各文档类型的章节定义构造 content_json：map 里没给的章节为空章节
+    function writingContent(kind, map = {}) {
+      const def = DOC_KINDS[kind]
+      return {
+        sections: def.sections.map((s) => ({
+          key: s.key,
+          title: s.title,
+          paragraphs: (map[s.key] || []).map(([id, text, sensitive = false]) => ({ id, text, sensitive })),
+        })),
+      }
+    }
+    const wc = (o) => JSON.stringify(writingContent(o.kind, o.map))
+
+    async function addWritingDoc(o) {
+      const docId = await d.insert(
+        'INSERT INTO writing_docs (case_id, doc_kind, title, status, current_version, created_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)',
+        [o.caseId, o.kind, o.title, o.status, 0, o.createdBy ?? 2, daysAgoIso(o.createdAgo ?? 30), daysAgoIso(o.updatedAgo ?? 1)]
+      )
+      let prevId = null
+      for (const v of o.versions) {
+        const ts = daysAgoIso(v.ago ?? 1)
+        const vid = await d.insert(
+          `INSERT INTO writing_versions (doc_id, version_no, save_type, base_version_id, parent_version_id, branch_from_version_id, content_json, summary, mask_snapshot_json, actor_id, actor_name, actor_role, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          [docId, v.no, v.type || '草稿', v.base ?? (v.no === 1 ? null : prevId), v.parent ?? prevId, v.branch ?? null,
+           wc({ kind: o.kind, map: v.map }), v.summary || '', maskSnapshot, v.actorId, v.actorName, v.actorRole, ts]
+        )
+        prevId = vid
+        v._id = vid
+      }
+      const head = o.versions[o.versions.length - 1]
+      const finalV = o.versions.find((v) => v.type === '定稿') || null
+      await d.query('UPDATE writing_docs SET current_version = ?, head_version_id = ?, status = ?, final_version_id = ?, finalized_at = ?, finalized_by = ?, updated_at = ? WHERE id = ?',
+        [head.no, head._id, o.status, finalV?._id ?? null, finalV ? daysAgoIso(finalV.ago ?? 1) : null, finalV ? finalV.actorId : null, daysAgoIso(o.updatedAgo ?? 1), docId])
+      return docId
+    }
+
+    // 附件：已上传版本同步写对象存储（不可变 key）；解析中版本只写了对象、状态未回填。
+    async function addAttachment(docId, filename, vers) {
+      const attId = await d.insert('INSERT INTO writing_attachments (doc_id, filename, current_version, created_at) VALUES (?,?,?,?)',
+        [docId, filename, vers[vers.length - 1].no, daysAgoIso(vers[vers.length - 1].ago ?? 2)])
+      for (const v of vers) {
+        const key = buildObjectKey({ attachmentId: attId, versionNo: v.no, filename })
+        await putObject(key, Buffer.from(v.bytes || `模拟原件 ${filename} v${v.no}`, 'utf8'))
+        await d.insert(
+          `INSERT INTO writing_attachment_versions (attachment_id, version_no, object_key, size_bytes, content_type, status, parse_note, uploaded_by, uploaded_by_name, created_at, parsed_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+          [attId, v.no, key, Buffer.byteLength(v.bytes || `模拟原件 ${filename} v${v.no}`, 'utf8'), v.ctype || 'application/pdf',
+           v.status, v.note || '', v.uploadedBy ?? 5, v.uploadedByLabel || '王工', daysAgoIso(v.ago ?? 2), v.status === '解析中' ? null : daysAgoIso((v.ago ?? 2) - 0.2)]
+        )
+      }
+      return attId
+    }
+
+    // 1 号案：交底书协同（客户 v1 → 代理人 v2 → 同段冲突取舍 v3，留痕一条已取舍冲突），
+    // 权利要求草稿在途，说明书已定稿并挂两版原件附件 + 联动定稿提交期限。
+    const disclosure1 = await addWritingDoc({
+      caseId: 1, kind: 'disclosure', title: '芯片散热结构交底（客户提供）', status: '草稿中', createdBy: 5, createdAgo: 40, updatedAgo: 6,
+      versions: [
+        { no: 1, type: '草稿', actorId: 5, actorName: '王工', actorRole: 'client_admin', ago: 18, summary: '客户初稿',
+          map: {
+            background: [['p_bg1', '现有芯片散热依赖外置风扇，模组内部热量在高功率密度下难以及时导出。']],
+            problem: [['p_pb1', '需要一种无需风扇、均温能力更强的芯片散热结构。']],
+            solution: [['p_s1', '在芯片与盖板之间设置均温板，回流工质在 85℃ 工况下完成相变循环。'], ['p_s2', '均温板毛细结构采用烧结铜粉，孔隙率 62%。', true]],
+            effect: [['p_ef1', '相同功耗下结温降低约 12℃。']],
+            prior_refs: [['p_pr1', '在先公开 CN 114123456 A 公开了均温板基本构造，本方案区别在毛细结构配方。', true]],
+          } },
+        { no: 2, type: '草稿', actorId: 2, actorName: '李慕华', actorRole: 'agent', ago: 12, summary: '代理人补充实施例（客户随后也在改 v1 同段，取舍后见 v3）',
+          map: {
+            background: [['p_bg1', '现有芯片散热依赖外置风扇，模组内部热量在高功率密度下难以及时导出。']],
+            problem: [['p_pb1', '需要一种无需风扇、均温能力更强的芯片散热结构。']],
+            solution: [['p_s1', '在芯片与盖板之间焊接均温板，工质在 60℃ 至 95℃ 工况下完成相变循环，并给出工质充装量区间。']],
+            effect: [['p_ef1', '相同功耗下结温降低约 12℃。']],
+            prior_refs: [['p_pr1', '在先公开 CN 114123456 A 公开了均温板基本构造，本方案区别在毛细结构配方。', true]],
+          } },
+        { no: 3, type: '冲突合并', actorId: 5, actorName: '王工', actorRole: 'client_admin', ago: 6, summary: '冲突取舍合并：技术方案第 1 段采用双方合并文本（1 段）',
+          map: {
+            background: [['p_bg1', '现有芯片散热依赖外置风扇，模组内部热量在高功率密度下难以及时导出。']],
+            problem: [['p_pb1', '需要一种无需风扇、均温能力更强的芯片散热结构。']],
+            solution: [['p_s1', '在芯片与盖板之间焊接均温板，回流工质在 60℃ 至 95℃ 工况下完成相变循环，毛细结构采用烧结铜粉并限定充装量。']],
+            effect: [['p_ef1', '相同功耗下结温降低约 12℃。']],
+            prior_refs: [['p_pr1', '在先公开 CN 114123456 A 公开了均温板基本构造，本方案区别在毛细结构配方。', true]],
+          } },
+      ],
+    })
+    // 补一条已取舍冲突留痕（v1 基线 / v2 先来 / v3 合并稿）
+    await d.insert(
+      `INSERT INTO writing_conflicts (doc_id, section_key, paragraph_id, base_version_id, incoming_version_id, resolved_version_id,
+         base_text, incoming_text, pending_text, incoming_actor_name, pending_actor_name, status, resolution, resolved_text, resolved_by, created_at, resolved_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,'已取舍',?,?,?,?,?)`,
+      [disclosure1, 'solution', 'p_s1', 1, 2, 3,
+       '在芯片与盖板之间设置均温板，回流工质在 85℃ 工况下完成相变循环。',
+       '在芯片与盖板之间焊接均温板，工质在 60℃ 至 95℃ 工况下完成相变循环，并给出工质充装量区间。',
+       '在芯片与盖板之间设置均温板，回流工质在 85℃ 工况下完成相变循环。毛细结构采用烧结铜粉，孔隙率 62%。',
+       '李慕华', '王工', 'merged',
+       '在芯片与盖板之间焊接均温板，回流工质在 60℃ 至 95℃ 工况下完成相变循环，毛细结构采用烧结铜粉并限定充装量。',
+       5, daysAgoIso(12), daysAgoIso(6)]
+    )
+    await addAttachment(disclosure1, '华芯-散热结构交底原稿.pdf', [
+      { no: 1, status: '已完成', note: 'PDF 文本层抽取完成，共 8 页', ago: 18, uploadedByLabel: '王工', bytes: 'PDF-1.4 模拟原件 v1：华芯散热结构交底原稿（含实验照片）' },
+      { no: 2, status: '已完成', note: '换版：客户补充图 5-7 后重新上传，旧版仍可下载', ago: 9, uploadedByLabel: '王工', bytes: 'PDF-1.4 模拟原件 v2：补充附图 5-7 与实测温漂数据' },
+    ])
+
+    await addWritingDoc({
+      caseId: 1, kind: 'claims', title: '权利要求草稿（散热结构）', status: '草稿中', createdBy: 2, createdAgo: 8, updatedAgo: 3,
+      versions: [
+        { no: 1, type: '草稿', actorId: 2, actorName: '李慕华', actorRole: 'agent', ago: 5, summary: '代理人首拟 3 项权利要求',
+          map: {
+            independent: [['p_c1', '1. 一种芯片散热结构，包括芯片、盖板与位于二者之间的均温板，其特征在于，均温板内设有烧结铜粉毛细结构并充装有相变工质。']],
+            dependent: [['p_c2', '2. 根据权利要求 1 所述的结构，其特征在于，所述毛细结构孔隙率为 55% 至 70%。'], ['p_c3', '3. 根据权利要求 1 所述的结构，其特征在于，均温板与盖板通过焊接固定。']],
+          } },
+        { no: 2, type: '草稿', actorId: 2, actorName: '李慕华', actorRole: 'agent', ago: 3, summary: '按二审交底合并稿调整充装量限定',
+          map: {
+            independent: [['p_c1', '1. 一种芯片散热结构，包括芯片、盖板与位于二者之间的均温板，其特征在于，均温板内设有烧结铜粉毛细结构，毛细结构孔隙率为 55% 至 70%，并充装有相变工质。']],
+            dependent: [['p_c2', '2. 根据权利要求 1 所述的结构，其特征在于，均温板与盖板通过焊接固定，工质在 60℃ 至 95℃ 工况下相变循环。']],
+          } },
+      ],
+    })
+
+    const spec1 = await addWritingDoc({
+      caseId: 1, kind: 'specification', title: '说明书定稿（散热结构）', status: '已定稿', createdBy: 2, createdAgo: 6, updatedAgo: 1,
+      versions: [
+        { no: 1, type: '草稿', actorId: 2, actorName: '李慕华', actorRole: 'agent', ago: 4, summary: '说明书初稿',
+          map: {
+            abstract: [['p_ab1', '本申请公开一种芯片散热结构，通过均温板内烧结铜粉毛细结构提升均温能力。']],
+            claims: [['p_cl1', '1. 一种芯片散热结构，包括芯片、盖板与位于二者之间的均温板……']],
+            spec_body: [['p_bd1', '下面结合附图对本申请作进一步说明。']],
+            prior_refs: [['p_pr1', '背景文献：CN 114123456 A；《均温板研究综述》(2019)。', true]],
+          } },
+        { no: 2, type: '定稿', actorId: 2, actorName: '李慕华', actorRole: 'agent', ago: 1, summary: '定稿提交，联动生成定稿提交期限',
+          map: {
+            abstract: [['p_ab1', '本申请公开一种芯片散热结构，通过均温板内烧结铜粉毛细结构与定量充装工质，在无风扇条件下显著降低结温。']],
+            claims: [['p_cl1', '1. 一种芯片散热结构，包括芯片、盖板与位于二者之间的均温板，其特征在于，均温板内设有孔隙率 55% 至 70% 的烧结铜粉毛细结构并充装有相变工质。']],
+            spec_body: [['p_bd1', '下面结合附图与实施例对本申请作进一步说明，实施例中工况温度覆盖 60℃ 至 95℃。']],
+            prior_refs: [['p_pr1', '背景文献：CN 114123456 A；《均温板研究综述》(2019)。', true]],
+          } },
+      ],
+    })
+    await addAttachment(spec1, '说明书定稿-签字版.pdf', [
+      { no: 1, status: '已完成', note: '客户签字扫描件 OCR 完成', ago: 1, uploadedBy: 2, uploadedByLabel: '李慕华', bytes: 'PDF-1.4 模拟原件：说明书定稿签字版 v1' },
+    ])
+    // 定稿联动期限：自收到日起 60 日、法定节假日顺延（沿用官文期限引擎）
+    {
+      const specDispatch = dayOffset(-20)
+      const specReceive = dayOffset(-16)
+      const r = computeDueDate({ start_date: specReceive, duration_days: 60, day_basis: 'legal' }, cal)
+      await d.insert(
+        `INSERT INTO deadlines (case_id, doc_id, writing_doc_id, dtype, anchor_basis, day_basis, start_date, duration_days, due_date, rolled, status, note, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [1, null, spec1, '定稿提交', 'receive', 'legal', specReceive, 60, r.due_date, r.rolled ? 1 : 0, '待处理',
+         `说明书定稿联动（发文日 ${specDispatch} / 收到日 ${specReceive}，以收到日为准）`, daysAgoIso(1)]
+      )
+    }
+
+    // 8 号案：交底书草稿全部作废（两条作废链），演示「草稿全部作废」空态与重开
+    const voidTitles = ['工业机器人关节模组交底（初版）', '工业机器人关节模组交底（客户重组后）']
+    for (const title of voidTitles) {
+      const docId = await addWritingDoc({
+        caseId: 8, kind: 'disclosure', title, status: '已作废', createdBy: 7, createdAgo: 60, updatedAgo: 30,
+        versions: [
+          { no: 1, type: '草稿', actorId: 7, actorName: '赵经理', actorRole: 'client_admin', ago: 45, summary: '客户初稿',
+            map: { background: [['p_bg1', '关节模组在重载启停时回程间隙偏大。']], solution: [['p_s1', '采用谐波减速并调整波发生器廓线。']] } },
+          { no: 2, type: '作废', actorId: 3, actorName: '陈远', actorRole: 'agent', ago: 30, summary: '作废：技术路线调整，该稿与新研发方向不符',
+            map: { background: [['p_bg1', '关节模组在重载启停时回程间隙偏大。']], solution: [['p_s1', '采用谐波减速并调整波发生器廓线。']] } },
+        ],
+      })
+      void docId
+    }
+
+    // 5 号案：交底书链已建但客户正文尚未提交，原件已上传仍在解析（第三种空态）
+    const disclosure5 = await d.insert(
+      'INSERT INTO writing_docs (case_id, doc_kind, title, status, current_version, created_by, created_at, updated_at) VALUES (?,?,?,?,0,?,?,?)',
+      [5, 'disclosure', '抗体偶联物制备工艺交底', '草稿中', 6, daysAgoIso(3), daysAgoIso(1)]
+    )
+    await addAttachment(disclosure5, '蓝湾-偶联实验记录扫描件.pdf', [
+      { no: 1, status: '解析中', note: '', ago: 1, uploadedByLabel: '陈博士', bytes: 'PDF-1.4 模拟原件：230 页实验记录扫描件（OCR 排队中）' },
+    ])
   })
 
-  console.log(`[seed] 完成：3 家客户 / 7 个账号 / 12 件案件（十态全覆盖）/ 2026 节假日 ${holidayDates.length + WORKDAYS_2026.length} 条 / 官文与期限 / 7 条费用；代理所今日口径 ${tzToday(config.firmTz)}`)
+  console.log(`[seed] 完成：3 家客户 / 7 个账号 / 12 件案件（十态全覆盖）/ 2026 节假日 ${holidayDates.length + WORKDAYS_2026.length} 条 / 官文与期限 / 7 条费用 / 撰稿交底·权要·定稿版本链（含段落冲突取舍、附件换版、定稿期限联动、草稿作废、附件解析中）/ 脱敏规则 v1；代理所今日口径 ${tzToday(config.firmTz)}`)
   return true
 }
