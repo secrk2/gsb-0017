@@ -158,3 +158,95 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   response TEXT NULL,
   created_at TEXT NOT NULL
 );
+
+-- ===== 撰稿与交底：技术交底书 / 权利要求草稿 / 说明书定稿，三类各一条版本链 =====
+-- 一个案件每类文书一条 draft；代理人与客户（交底书）共用同一条链。
+-- 链上每次保存产生一条不可变 draft_versions；最新有效版本由 current_version_id 指示，
+-- 全部版本作废时该指针为 NULL（对应「草稿全部作废」空态，可从任一历史版本重开）。
+CREATE TABLE IF NOT EXISTS drafts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  case_id INTEGER NOT NULL,
+  dtype TEXT NOT NULL,                  -- technical_disclosure 技术交底书 / claims 权利要求草稿 / specification 说明书定稿
+  status TEXT NOT NULL DEFAULT '编辑中', -- 编辑中 / 已定稿
+  current_version_id INTEGER NULL,      -- 最新「有效」版本；全部作废时为 NULL
+  final_version_id INTEGER NULL,        -- 定稿所依据的版本
+  deadline_id INTEGER NULL,             -- 定稿提交期限（复用 deadlines 表与官文同一套口径）
+  finalized_at TEXT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (case_id, dtype)
+);
+CREATE INDEX IF NOT EXISTS idx_draft_case ON drafts (case_id);
+
+-- 版本内容一经写入不可修改；「重开/作废」都只追加新版本或改状态位。
+-- paras_json 为结构化段落（含 secret/citation 段落标记，所内可见）；
+-- masked_paras_json 是生成当时按当时脱敏规则固化的脱敏快照——规则以后调整，已发出的历史版本内容不跟着变。
+CREATE TABLE IF NOT EXISTS draft_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  draft_id INTEGER NOT NULL,
+  version_no INTEGER NOT NULL,
+  parent_id INTEGER NULL,               -- 编辑所基于的版本
+  merged_from_id INTEGER NULL,          -- 并发合并时服务端的最新版本（无冲突快进时为 NULL）
+  content TEXT NOT NULL DEFAULT '',     -- 原文快照（段落以空行分隔）
+  paras_json TEXT NOT NULL DEFAULT '[]',
+  masked_paras_json TEXT NOT NULL DEFAULT '[]',
+  mask_rule_version INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL DEFAULT '有效',  -- 有效 / 已作废
+  author_id INTEGER NULL,
+  author_name TEXT NOT NULL DEFAULT '',
+  author_role TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',     -- 本次修改说明
+  attachment_file_id INTEGER NULL,      -- 该版本生成时附件指向的文件版本（换版后历史版本仍按此打开旧文件）
+  merge_resolutions_json TEXT NOT NULL DEFAULT '[]', -- 段落冲突取舍留痕
+  created_at TEXT NOT NULL,
+  voided_at TEXT NULL,
+  void_reason TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_dv_draft ON draft_versions (draft_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_dv_draft_ver ON draft_versions (draft_id, version_no);
+
+-- 附件元数据入库，文件本体走对象存储（local 落盘 / S3 兼容），绝不入库。
+-- 换版追加 draft_attachment_files 新行（新 object_key），旧行旧 key 永久保留 → 旧版本仍打得开。
+CREATE TABLE IF NOT EXISTS draft_attachments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  draft_id INTEGER NOT NULL,
+  case_id INTEGER NOT NULL,
+  label TEXT NOT NULL DEFAULT '原件',
+  status TEXT NOT NULL DEFAULT '解析中',  -- 解析中 / 就绪 / 解析失败
+  current_file_id INTEGER NULL,
+  created_by INTEGER NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_da_draft ON draft_attachments (draft_id);
+
+CREATE TABLE IF NOT EXISTS draft_attachment_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  attachment_id INTEGER NOT NULL,
+  version_no INTEGER NOT NULL,
+  object_key TEXT NOT NULL,             -- 对象存储 key（driver/bucket 一同留档）
+  bucket TEXT NOT NULL DEFAULT '',
+  driver TEXT NOT NULL DEFAULT 'local',
+  original_name TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL DEFAULT 0,
+  content_type TEXT NOT NULL DEFAULT '',
+  sha256 TEXT NOT NULL DEFAULT '',
+  parse_status TEXT NOT NULL DEFAULT '解析中', -- 解析中 / 就绪 / 解析失败
+  parse_note TEXT NOT NULL DEFAULT '',
+  uploaded_by INTEGER NULL,
+  created_at TEXT NULL,
+  parsed_at TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_daf_attachment ON draft_attachment_files (attachment_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daf_ver ON draft_attachment_files (attachment_id, version_no);
+
+-- 脱敏规则版本：改规则只追加新版本（is_active 指向当前版本）。
+-- 历史版本的快照在生成时已固化，规则变更不回溯。
+CREATE TABLE IF NOT EXISTS mask_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version INTEGER NOT NULL UNIQUE,
+  rules_json TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 0,
+  note TEXT NOT NULL DEFAULT '',
+  created_by INTEGER NULL,
+  created_at TEXT NOT NULL
+);

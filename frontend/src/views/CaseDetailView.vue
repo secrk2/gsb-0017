@@ -51,6 +51,9 @@
         <CompletionMeter :completion="c.completion" v-model:basis="completionBasis" />
       </div>
 
+      <!-- 撰稿与交底：三文书版本链 / 段落冲突取舍 / 脱敏 / 定稿 / 附件 -->
+      <DraftPanel class="mt16" :case-id="id" :docs="c.docs" />
+
       <!-- 官文与期限 -->
       <div class="grid grid-2 mt16">
         <!-- 官文 -->
@@ -317,6 +320,7 @@ import ErrorState from '../components/ErrorState.vue'
 import RevealModal from '../components/RevealModal.vue'
 import CompletionMeter from '../components/CompletionMeter.vue'
 import DocRegisterModal from '../components/DocRegisterModal.vue'
+import DraftPanel from '../components/DraftPanel.vue'
 
 const route = useRoute()
 const id = Number(route.params.id)

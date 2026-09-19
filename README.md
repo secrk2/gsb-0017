@@ -1,6 +1,6 @@
 # 专利云 · 案件全生命周期管理
 
-所内自研的专利案件管理平台。当前里程碑：**整体骨架 + 案件作战台 + 委托与客户 + 官文与期限（官文驱动状态机、双起算口径/三天数口径期限、月周日历、完成度两口径）**。
+所内自研的专利案件管理平台。当前里程碑：**整体骨架 + 案件作战台 + 委托与客户 + 官文与期限（官文驱动状态机、双起算口径/三天数口径期限、月周日历、完成度两口径）+ 撰稿与交底（三类文书版本链、段落级协作冲突取舍、不可变脱敏快照、定稿期限联动、附件对象存储）**。
 
 ## 一键启动
 
@@ -28,7 +28,7 @@ docker compose up -d --build
 | `reviewer01` | 郑严 | 审核员 | 授权/驳回/复审登记、查看留痕 |
 | `client01/02/03` | 王工/陈博士/赵经理 | 客户管理员 | 仅本客户的案件/合同/费用（越权访问返回 403 错误态） |
 
-预置数据：3 家客户（华芯半导体/蓝湾生物/星野智能）、3 份委托合同、12 件案件（覆盖委托中/已立项/申请/受理/初审/实审中/复审中/授权/驳回/无效十态，含驳回→复审→发回实审的法定回退样例）、34 份官文（含已归档/半截已登记/全部撤回三种形态）、2026 年法定节假日与调休补班表、由官文起算的期限（含临近、逾期留痕、春节/国庆顺延样例）、7 条费用（3 笔逾期红点）。
+预置数据：3 家客户（华芯半导体/蓝湾生物/星野智能）、3 份委托合同、12 件案件（覆盖委托中/已立项/申请/受理/初审/实审中/复审中/授权/驳回/无效十态，含驳回→复审→发回实审的法定回退样例）、34 份官文（含已归档/半截已登记/全部撤回三种形态）、2026 年法定节假日与调休补班表、由官文起算的期限（含临近、逾期留痕、春节/国庆顺延样例）、7 条费用（3 笔逾期红点），以及撰稿样例：1 号案交底书代理人与客户三版协作链（含 secret/citation 段）、3 号案交底书草稿全部作废、5 号案交底附件解析中、6 号案无任何草稿、11 号案说明书已定稿并挂对象存储原件与定稿提交期限。
 
 ## 官文与期限
 
@@ -49,6 +49,30 @@ docker compose up -d --build
 - **关键阶段**：已到达法定阶段数 / 该案件类型关键阶段总数（发明 5 阶段、实用新型/外观 4 阶段；回退不扣已达阶段）。
 - **官文归档**：已归档官文数 / 官文登记总数（含已撤回）。走完程序但官文只登记未归档的「半截」案件，两口径方向相反，故界面始终标明当前口径。
 - 作战台总览、案件详情、CSV 导出（`GET /api/dashboard/export.csv`）三处数字全部来自后端同一 `lib/completion.js`，作战台与详情可切换口径，CSV 两列都给并在首行写明口径与基准日。
+
+## 撰稿与交底（技术交底书 / 权利要求草稿 / 说明书定稿）
+
+案件详情页新增「撰稿与交底」面板，三类文书各一条**版本链**（表 `drafts` + 不可变的 `draft_versions`），代理人与客户在交底书上共用同一条链。
+
+### 版本链：每次保存出版本，可 diff、可从任一版本重开
+- 保存必须携带所基于的 `parent_id`，服务端拿 父版本/提交版/服务端最新版 做**段落级三路合并**（`lib/paragraphs.js`，段落 key 在整条链上稳定）：只有一方改自动并入；双方改成相同内容不冲突；**同一段被双方改成不同内容 → `409 PARAGRAPH_CONFLICT` 并带回逐段冲突清单**，弹出取舍界面逐段选「我的 / 对方 / 折中自拟」，裁决留痕（谁、选了谁）后才生成新版本——后来者绝不静默覆盖，也不会被一句「已锁定」拒掉；一方删、另一方改同样报冲突，双方共删才静默生效。
+- 可看任意相邻版本的段落级前后差异（新增/修改/删除）；版本可作废（原因必填留痕），**最后一个有效版本作废后进入「草稿全部作废」空态**；可从任一历史版本（含已作废版本）复制段落另起新版本重开，链不断、旧版本原样保留。
+- 定稿冻结文本；定稿后改稿返回 `409 DRAFT_FINALIZED`。
+
+### 脱敏：两边共用一条链，客户只看固化快照，规则调整不回溯
+- 代理人所见为原文（可给段落打 `secret` 未公开技术细节 / `citation` 在先引用 标记，行内还有知号、关键词替换）；**客户侧看到的是脱敏版**：标记段整段遮蔽、在先专利号/申请号与敏感词替换。
+- 脱敏结果在**版本生成当时按当时生效的规则版本固化**进该版本行（`masked_paras_json` + `mask_rule_version`）。规则以后调整只追加 `mask_rules` 新版本，只对之后的新版本生效，**已发出的历史版本内容绝不跟着变**。
+- 客户基于脱敏版回存时服务端按父版本快照对账：含敏感内容的段落客户侧锁定、未改段恢复原文，占位文本不可能写回原文；冲突回显对客户再做一次脱敏兜底。
+
+### 定稿附件：走对象存储，不入库；换版旧版仍可打开
+- 附件只在库存元数据与对象 key（`draft_attachments` / `draft_attachment_files`），文件本体在对象存储：`STORAGE_DRIVER=local`（开发/compose，compose 挂 `patent_storage` 持久卷）或 `s3`（S3 兼容，原生 SigV4，无额外 SDK）。
+- 每次换版生成**不可变新对象 key**，旧 key 永久保留；每个版本行钉住生成当时的附件文件 id，故「下载该版本当时的附件」永远拿到旧对象。上传后异步解析（`解析中 → 就绪/解析失败`），不拿半截结果冒充就绪。
+
+### 期限联动：沿用官文那套口径，界面明示以谁为准
+定稿可同时登记「定稿提交」期限，与官文登记**共用同一引擎**（`resolveStart` + `computeDueDate`）：起算可选**自收到日**（缺收到日按发文日+15 日推定）或**自发文日**，天数可选自然日/工作日/法定节假日顺延；表单实时预览起算日及其性质、到期日、是否顺延、剩余天数，并明示「以收到日/发文日为准」。落点早于代理所今日同样先走 `409 OVERDUE_CONFIRM` 二次确认、再要求不少于 2 字超期原因留痕。
+
+### 三种空态分开撰写
+- **还没有草稿**（无任何版本）；**草稿全部作废**（有版本但均已作废，可从历史版本重开）；**附件还在解析**（原件已传、文本版本尚不可基于其撰写，每 2.5 秒轮询）——三种各给独立空态与下一步，不统一用「暂无数据」。
 
 ## 业务规则
 
@@ -84,7 +108,7 @@ cd frontend && npm install && npm run dev       # :5173，/api 代理到 7103
 cd backend && npm test
 ```
 
-58 个用例：状态机单测（十态邻接图、法定回退、跳步/角色/案件类型分叉）、期限引擎单测（自然日/工作日/法定顺延、春节 9 天假与调休补班、普通周末、推定起算）、完成度两口径单测、脱敏单测，以及真实 HTTP 集成测试（全链路、官文登记驱动流转、超期二次确认留痕、归档/撤回、日历区间、CSV 导出、越权 403、脱敏留痕、幂等重放、离线含 `doc.register/archive/withdraw` 合并去重与冲突、缓存失效）。
+90 个用例：状态机单测（十态邻接图、法定回退、跳步/角色/案件类型分叉）、期限引擎单测（自然日/工作日/法定顺延、春节 9 天假与调休补班、普通周末、推定起算）、完成度两口径单测、脱敏单测、撰稿段落三路合并/冲突/diff 单测，以及真实 HTTP 集成测试（全链路、官文登记驱动流转、超期二次确认留痕、归档/撤回、日历区间、CSV 导出、越权 403、脱敏留痕、幂等重放、离线含 `doc.register/archive/withdraw` 合并去重与冲突、缓存失效；撰稿版本链、双方同段冲突 409 与逐段取舍、作废与历史版本重开、客户脱敏对账与规则改后历史不回溯、附件换版旧对象可下载、定稿期限官文口径与逾期留痕、三空态）。
 
 ## API 概览
 
@@ -102,10 +126,23 @@ POST /api/cases/:id/deadline-preview  期限到期日实时预览（起算/天�
 POST /api/docs/:id/archive|withdraw   官文归档（幂等）/ 撤回（原因必填留痕）
 GET  /api/calendar?from=&to=&basis=   日历区间（官文发文/收到日落点 + 期限到期落点）
 GET  /api/holidays                 GET /api/doc-types   节假日调休表 / 官文类型字典
+
+# 撰稿与交底（三类文书各一条版本链；客户侧 GET 自动返回固化脱敏版）
+GET  /api/cases/:id/drafts            三文书概览（exists/empty_state：no_draft|all_void|attachment_parsing）
+GET  /api/cases/:id/drafts/:dtype     版本链 + 当前版本 + 附件 + 定稿期限（:dtype=technical_disclosure|claims|specification）
+POST /api/cases/:id/drafts/:dtype/versions   保存即版本（parent_id 三路合并；冲突 409 PARAGRAPH_CONFLICT + resolutions 取舍）
+POST /api/cases/:id/drafts/:dtype/void|reopen  作废（原因留痕）/ 从任一历史版本重开
+GET  /api/cases/:id/drafts/:dtype/diff?from=&to=   段落级前后差异
+POST /api/cases/:id/drafts/:dtype/finalize-preview  定稿期限预览（官文同口径）
+POST /api/cases/:id/drafts/:dtype/finalize          定稿（可同期登记期限；逾期二次确认+原因留痕）
+POST /api/cases/:id/drafts/:dtype/attachments       附件原件上传（原始字节，走对象存储不入库）
+GET  /api/attachments/:id/download | /api/draft-versions/:vid/download  当前版 / 版本当时附件
+GET|POST /api/mask-rules            脱敏规则版本（管理员可改，追加版本不回溯历史快照）
+
 GET  /api/dashboard/export.csv     完成度 CSV（两口径列）
 POST /api/ops/deadlines/:id/complete   POST /api/ops/fees/:id/pay   （幂等）
 GET  /api/ops/agents               GET /api/logs/unmask|events
-POST /api/sync/batch               离线变更批量合并（case.* / doc.register / doc.archive / doc.withdraw / deadline.complete / fee.pay）
+POST /api/sync/batch               离线变更批量合并（case.* / doc.register / doc.archive / doc.withdraw / deadline.complete / fee.pay / draft.save / draft.reopen / draft.void）
 GET  /api/health
 ```
 
@@ -117,15 +154,15 @@ GET  /api/health
 ├── docker-compose.yml        # mysql / redis / backend:7103 / frontend:8103
 ├── mysql/init.sql            # 建库建表（种子数据由后端首启写入）
 ├── backend/
-│   ├── src/lib/              # 状态机、官文类型目录、期限引擎、完成度、脱敏（纯函数，可单测）
+│   ├── src/lib/              # 状态机、官文类型目录、期限引擎、完成度、脱敏、撰稿段落合并/脱敏快照（纯函数，可单测）
 │   ├── src/middleware/       # JWT 鉴权、租户隔离、幂等
-│   ├── src/services/         # 业务核心（官文登记/日历/导出，路由与离线合并共用）
+│   ├── src/services/         # 业务核心（官文登记/日历/导出、撰稿版本链、storage 对象存储，路由与离线合并共用）
 │   ├── src/routes/           # REST 路由
 │   ├── src/drivers/          # mysql（生产）/ sqlite（开发测试）
 │   └── test/                 # node:test 单元 + 集成
 └── frontend/
     ├── src/views/            # 作战台 / 委托与客户 / 案件 / 官文日历 / 留痕
-    ├── src/components/       # 官文登记弹窗、完成度条、漏斗、脱敏弹窗等
+    ├── src/components/       # 官文登记弹窗、撰稿面板、完成度条、漏斗、脱敏弹窗等
     ├── src/offline.js        # IndexedDB 缓存 + 待同步队列
     └── public/sw.js          # 应用外壳离线缓存
 ```

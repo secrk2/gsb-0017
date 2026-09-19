@@ -4,6 +4,8 @@ process.env.SQLITE_FILE = ':memory:'
 process.env.REDIS_URL = 'memory://'
 process.env.JWT_SECRET = 'test-secret'
 process.env.BCRYPT_ROUNDS = '4'
+process.env.STORAGE_DRIVER = 'local'
+process.env.STORAGE_LOCAL_DIR = '/tmp/patent-cloud-test-storage'
 
 export async function boot() {
   const { initDb, waitForDb } = await import('../src/db.js')

@@ -12,6 +12,7 @@ import miscRoutes from './routes/misc.js'
 import logRoutes from './routes/logs.js'
 import syncRoutes from './routes/sync.js'
 import docRoutes from './routes/docs.js'
+import draftRoutes from './routes/drafts.js'
 
 export function createApp() {
   const app = express()
@@ -43,6 +44,7 @@ export function createApp() {
   app.use('/api/logs', logRoutes)
   app.use('/api/sync', syncRoutes)
   app.use('/api', docRoutes)
+  app.use('/api', draftRoutes)
 
   app.use('/api', (_req, res) => res.status(404).json({ error: { code: 'NOT_FOUND', message: '接口不存在' } }))
   app.use(errorHandler)

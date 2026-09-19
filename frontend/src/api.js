@@ -110,9 +110,53 @@ export async function logout() {
   store.logout()
 }
 
-// 带认证的文件下载（CSV 导出）：拿到文本后由调用方触发浏览器保存
-export async function downloadText(path, filename) {
+// 附件原件：原始字节上传（不经 multipart，文件名走 X-File-Name；与服务端 express.raw 对应）
+export async function uploadRaw(path, file) {
+  const resp = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${store.token}`,
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(file.name),
+      'X-Content-Type': file.type || 'application/octet-stream',
+    },
+    body: file,
+  })
+  const json = await resp.json().catch(() => null)
+  if (!resp.ok) throw new ApiError(resp.status, json?.error?.code || 'ERROR', json?.error?.message || '上传失败')
+  return { data: json.data }
+}
+
+// 附件下载：拿到字节后由调用方决定保存名
+export async function downloadBytes(path) {
   const resp = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${store.token}` } })
+  if (!resp.ok) throw new ApiError(resp.status, 'DOWNLOAD_FAILED', `下载失败（${resp.status}）`)
+  const blob = await resp.blob()
+  const name = parseFilename(resp.headers.get('Content-Disposition')) || '附件原件'
+  return { blob, name, version: resp.headers.get('X-File-Version') }
+}
+
+export function saveBlob(blob, filename) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+function parseFilename(disposition) {
+  if (!disposition) return null
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8) return decodeURIComponent(utf8[1])
+  const plain = disposition.match(/filename="?([^";]+)"?/i)
+  return plain ? plain[1] : null
+}
+
+// 带认证的文件下载（CSV 导出）：拿到文本后由调用方触发浏览器保存
+export async function downloadText(path, filename) {  const resp = await fetch(`/api${path}`, { headers: { Authorization: `Bearer ${store.token}` } })
   if (!resp.ok) throw new ApiError(resp.status, 'DOWNLOAD_FAILED', `导出失败（${resp.status}）`)
   const text = await resp.text()
   const blob = new Blob([text], { type: 'text/csv;charset=utf-8' })

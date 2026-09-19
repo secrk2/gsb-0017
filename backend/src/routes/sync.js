@@ -5,6 +5,7 @@ import { requireRole } from '../middleware/auth.js'
 import { createCase, transitionCase } from '../services/caseService.js'
 import { completeDeadline, payFee } from '../services/workflowService.js'
 import { registerDoc, archiveDoc, withdrawDoc } from '../services/docService.js'
+import { saveVersion, reopenFromVersion, voidVersion } from '../services/draftingService.js'
 
 const router = Router()
 
@@ -71,6 +72,22 @@ async function applyOp(user, op) {
         out = { status: 'applied', data: { id: Number(payload.id) } }
         break
       }
+      case 'draft.save': {
+        out = await syncDraftSave(user, payload)
+        break
+      }
+      case 'draft.reopen': {
+        await reopenFromVersion(user, Number(payload.case_id), payload.dtype, {
+          from_version_id: Number(payload.body?.from_version_id), summary: payload.body?.summary || '',
+        })
+        out = { status: 'applied', data: { case_id: Number(payload.case_id), dtype: payload.dtype } }
+        break
+      }
+      case 'draft.void': {
+        await voidVersion(user, Number(payload.case_id), payload.dtype, Number(payload.body?.version_id), { reason: payload.body?.reason })
+        out = { status: 'applied', data: { case_id: Number(payload.case_id), dtype: payload.dtype } }
+        break
+      }
       default:
         out = { status: 'error', code: 'UNKNOWN_OP', message: `未知操作类型：${type}` }
     }
@@ -97,8 +114,7 @@ async function syncTransition(user, payload) {
   }
 }
 
-async function syncDocRegister(user, payload) {
-  try {
+async function syncDocRegister(user, payload) {  try {
     const r = await registerDoc(user, Number(payload.case_id), payload.body || {})
     return {
       status: 'applied',
@@ -107,6 +123,19 @@ async function syncDocRegister(user, payload) {
   } catch (e) {
     // 官文驱动的流转与服务器现状冲突，或落点逾期未二次确认：交回前端人工处理，不丢操作
     if (['ILLEGAL_ROLLBACK', 'ILLEGAL_TRANSITION', 'NOT_ASSIGNEE', 'ROLE_DENIED', 'CTYPE_PATH_MISMATCH', 'OVERDUE_CONFIRM', 'OVERDUE_REASON_REQUIRED'].includes(e.code)) {
+      return { status: 'conflict', code: e.code, message: e.message, details: e.details }
+    }
+    throw e
+  }
+}
+
+async function syncDraftSave(user, payload) {
+  try {
+    const r = await saveVersion(user, Number(payload.case_id), payload.dtype, payload.body || {})
+    return { status: 'applied', data: { draft_id: r.draftId, version_id: r.versionId, version_no: r.versionNo } }
+  } catch (e) {
+    // 段落并发冲突 / 定稿后改稿 / 缺少父版本：交回前端逐段取舍，不丢离线内容
+    if (['PARAGRAPH_CONFLICT', 'PARENT_REQUIRED', 'PARENT_NOT_FOUND', 'DRAFT_FINALIZED', 'ROLE_DENIED'].includes(e.code)) {
       return { status: 'conflict', code: e.code, message: e.message, details: e.details }
     }
     throw e

@@ -160,3 +160,89 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   response MEDIUMTEXT NULL,
   created_at VARCHAR(19) NOT NULL
 ) ENGINE=InnoDB;
+
+-- ===== 撰稿与交底：技术交底书 / 权利要求草稿 / 说明书定稿，三类各一条版本链 =====
+-- 每次保存追加一条不可变 draft_versions；代理人与客户（交底书）共用同一条链。
+CREATE TABLE IF NOT EXISTS drafts (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  case_id INT NOT NULL,
+  dtype VARCHAR(30) NOT NULL,           -- technical_disclosure / claims / specification
+  status VARCHAR(10) NOT NULL DEFAULT '编辑中', -- 编辑中 / 已定稿
+  current_version_id INT NULL,          -- 最新有效版本；全部作废时为 NULL
+  final_version_id INT NULL,
+  deadline_id INT NULL,                 -- 定稿提交期限（复用官文同一套口径）
+  finalized_at VARCHAR(19) NULL,
+  created_at VARCHAR(19) NOT NULL,
+  updated_at VARCHAR(19) NOT NULL,
+  UNIQUE KEY uq_draft_case_type (case_id, dtype),
+  INDEX idx_draft_case (case_id)
+) ENGINE=InnoDB;
+
+-- masked_paras_json 为按生成当时规则固化的脱敏快照；规则以后调整不回溯历史版本。
+CREATE TABLE IF NOT EXISTS draft_versions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  draft_id INT NOT NULL,
+  version_no INT NOT NULL,
+  parent_id INT NULL,
+  merged_from_id INT NULL,
+  content MEDIUMTEXT NOT NULL,
+  paras_json MEDIUMTEXT NOT NULL,
+  masked_paras_json MEDIUMTEXT NOT NULL,
+  mask_rule_version INT NOT NULL DEFAULT 1,
+  status VARCHAR(10) NOT NULL DEFAULT '有效',  -- 有效 / 已作废
+  author_id INT NULL,
+  author_name VARCHAR(50) NOT NULL DEFAULT '',
+  author_role VARCHAR(20) NOT NULL DEFAULT '',
+  summary VARCHAR(300) NOT NULL DEFAULT '',
+  attachment_file_id INT NULL,          -- 版本生成时附件指向的文件版本（旧版本永久打开旧对象）
+  merge_resolutions_json TEXT NOT NULL,
+  created_at VARCHAR(19) NOT NULL,
+  voided_at VARCHAR(19) NULL,
+  void_reason VARCHAR(300) NOT NULL DEFAULT '',
+  UNIQUE KEY uq_dv_draft_ver (draft_id, version_no),
+  INDEX idx_dv_draft (draft_id)
+) ENGINE=InnoDB;
+
+-- 附件元数据入库，文件本体在对象存储（local 落盘 / S3 兼容），不入库。
+CREATE TABLE IF NOT EXISTS draft_attachments (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  draft_id INT NOT NULL,
+  case_id INT NOT NULL,
+  label VARCHAR(60) NOT NULL DEFAULT '原件',
+  status VARCHAR(10) NOT NULL DEFAULT '解析中',  -- 解析中 / 就绪 / 解析失败
+  current_file_id INT NULL,
+  created_by INT NULL,
+  created_at VARCHAR(19) NOT NULL,
+  INDEX idx_da_draft (draft_id)
+) ENGINE=InnoDB;
+
+-- 换版追加新行新 object_key，旧行旧 key 保留 → 旧版本仍打得开。
+CREATE TABLE IF NOT EXISTS draft_attachment_files (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  attachment_id INT NOT NULL,
+  version_no INT NOT NULL,
+  object_key VARCHAR(300) NOT NULL,
+  bucket VARCHAR(80) NOT NULL DEFAULT '',
+  driver VARCHAR(20) NOT NULL DEFAULT 'local',
+  original_name VARCHAR(255) NOT NULL DEFAULT '',
+  size INT NOT NULL DEFAULT 0,
+  content_type VARCHAR(100) NOT NULL DEFAULT '',
+  sha256 VARCHAR(64) NOT NULL DEFAULT '',
+  parse_status VARCHAR(10) NOT NULL DEFAULT '解析中',
+  parse_note VARCHAR(300) NOT NULL DEFAULT '',
+  uploaded_by INT NULL,
+  created_at VARCHAR(19) NULL,
+  parsed_at VARCHAR(19) NULL,
+  UNIQUE KEY uq_daf_ver (attachment_id, version_no),
+  INDEX idx_daf_attachment (attachment_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS mask_rules (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  version INT NOT NULL UNIQUE,
+  rules_json MEDIUMTEXT NOT NULL,
+  is_active INT NOT NULL DEFAULT 0,
+  note VARCHAR(300) NOT NULL DEFAULT '',
+  created_by INT NULL,
+  created_at VARCHAR(19) NOT NULL
+) ENGINE=InnoDB;

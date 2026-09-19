@@ -19,4 +19,18 @@ export const config = {
   // 代理所所在地时区：期限日期按此时区解释「今天/剩几天/是否逾期」。
   // 存储一律 UTC/日历日字符串，跨时区展示由前端按此时区换算。
   firmTz: process.env.FIRM_TZ || 'Asia/Shanghai',
+  // 定稿附件对象存储：local 落盘（开发/测试/单机） | s3（S3 兼容，生产）。
+  // 文件本体绝不入库，库里只存 object_key 等元数据；换版生成新 key，旧 key 永久保留。
+  storage: {
+    driver: process.env.STORAGE_DRIVER || 'local',
+    localDir: process.env.STORAGE_LOCAL_DIR || '/tmp/patent-cloud-storage',
+    s3: {
+      endpoint: process.env.S3_ENDPOINT || '',
+      region: process.env.S3_REGION || 'us-east-1',
+      bucket: process.env.S3_BUCKET || 'patent-cloud',
+      accessKeyId: process.env.S3_ACCESS_KEY_ID || '',
+      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY || '',
+      forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== 'false',
+    },
+  },
 }

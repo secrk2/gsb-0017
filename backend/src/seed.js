@@ -4,6 +4,8 @@ import { config } from './config.js'
 import { nowIso, daysFromNow, addDays, tzToday } from './lib/dates.js'
 import { docTypeDef } from './lib/docTypes.js'
 import { computeDueDate } from './lib/deadlineCalc.js'
+import { DEFAULT_RULES, normRules, maskParas } from './lib/draftMask.js'
+import { getStorage, buildObjectKey, sha256Of } from './services/storage/index.js'
 
 // 首次启动（users 表为空）时写入演示业务数据：
 // 3 家委托客户、账号、覆盖全部状态的案件、2026 法定节假日、
@@ -57,6 +59,9 @@ export async function seedIfEmpty() {
     workdays: new Set(WORKDAYS_2026.map(([d]) => d)),
   }
 
+  // 附件元数据/对象 key 在事务内落库，文件本体事务后写入对象存储
+  const pendingAttachments = []
+  const draftIds = {}
   await tx(async (d) => {
     // ---- 法定节假日 / 调休补班 ----
     for (const [date, name] of holidayDates) {
@@ -277,8 +282,130 @@ export async function seedIfEmpty() {
         caseId, kind, amount, daysFromNow(due), paid ? '已缴' : '待缴', paid ? daysAgoIso(Math.abs(due) + 2) : null, daysAgoIso(30),
       ])
     }
+
+    // ---- 撰稿与交底：版本链 / 脱敏 / 冲突协作 / 定稿 + 附件（三空态样例分布在不同案件）----
+    const RULE_VERSION = 1
+    await d.insert('INSERT INTO mask_rules (version, rules_json, is_active, note, created_by, created_at) VALUES (?,?,?,?,?,?)',
+      [RULE_VERSION, JSON.stringify(normRules(DEFAULT_RULES)), 1, '初始脱敏规则：未公开技术细节、在先引用整段遮蔽；在先知号关键词替换', 1, now])
+
+    // 生成一条版本（paras: [{text, tags?}]，段落 key 显式给出便于跨版本 diff）
+    async function addDraftVersion(caseId, dtype, no, paras, { authorId, authorName, authorRole, parent = null, mergedFrom = null, summary = '', attFileId = null, status = '有效', voidReason = '' } = {}) {
+      const ps = paras.map((p, i) => ({ key: p.key || `p-${dtype}-${caseId}-${no}-${i}`, text: p.text, tags: p.tags || [] }))
+      const masked = maskParas(ps, DEFAULT_RULES)
+      const content = ps.map((p) => p.text).join('\n\n')
+      const id = await d.insert(
+        `INSERT INTO draft_versions (draft_id, version_no, parent_id, merged_from_id, content, paras_json, masked_paras_json, mask_rule_version,
+          status, author_id, author_name, author_role, summary, attachment_file_id, merge_resolutions_json, created_at, voided_at, void_reason)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [draftIds[`${caseId}:${dtype}`], no, parent, mergedFrom, content, JSON.stringify(ps), JSON.stringify(masked.paras), RULE_VERSION,
+         status, authorId, authorName, authorRole, summary, attFileId, '[]', daysAgoIso(Math.max(1, 30 - no * 4)),
+         status === '已作废' ? daysAgoIso(Math.max(1, 30 - no * 4)) : null, voidReason]
+      )
+      return id
+    }
+    async function ensureDraft(caseId, dtype) {
+      const key = `${caseId}:${dtype}`
+      if (!draftIds[key]) {
+        draftIds[key] = await d.insert('INSERT INTO drafts (case_id, dtype, status, created_at, updated_at) VALUES (?,?,?,?,?)',
+          [caseId, dtype, '编辑中', daysAgoIso(30), daysAgoIso(20)])
+      }
+      return draftIds[key]
+    }
+    async function seedAttachment(caseId, dtype, { name, body, parseStatus = '就绪', pages = 12 }) {
+      await ensureDraft(caseId, dtype)
+      const draftId = draftIds[`${caseId}:${dtype}`]
+      const attId = await d.insert('INSERT INTO draft_attachments (draft_id, case_id, label, status, current_file_id, created_by, created_at) VALUES (?,?,?,?,?,?,?)',
+        [draftId, caseId, '原件', parseStatus, null, 1, daysAgoIso(20)])
+      const sha = sha256Of(body)
+      // 先用空 key 落库拿 id，再回填正式 key（与正式上传同一套不可变 key 规则）
+      const fileId = await d.insert(
+        `INSERT INTO draft_attachment_files (attachment_id, version_no, object_key, bucket, driver, original_name, size, content_type, sha256, parse_status, parse_note, uploaded_by, created_at, parsed_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [attId, 1, '', '', 'local', name, body.length, 'application/pdf', sha, parseStatus,
+         parseStatus === '就绪' ? `原件解析完成：约 ${pages} 页，已建立全文索引。` : '', 1, daysAgoIso(20), parseStatus === '就绪' ? daysAgoIso(20) : null])
+      const objectKey = buildObjectKey({ caseId, dtype, attachmentId: attId, versionNo: 1, filename: name, sha256: sha })
+      await d.query('UPDATE draft_attachment_files SET object_key = ?, bucket = ? WHERE id = ?', [objectKey, 'local', fileId])
+      await d.query('UPDATE draft_attachments SET current_file_id = ? WHERE id = ?', [fileId, attId])
+      pendingAttachments.push({ objectKey, body })
+      return { attId, fileId, objectKey }
+    }
+
+    // 1 号案（实审中）：技术交底书，代理人与客户同链协作的活跃样例
+    await ensureDraft(1, 'technical_disclosure')
+    let v1 = await addDraftVersion(1, 'technical_disclosure', 1, [
+      { key: 'p1-bg', text: '本发明涉及高功率芯片的散热结构，旨在解决现有均热板热阻偏高的问题。' },
+      { key: 'p1-core', text: '核心结构为石墨烯复合均热层与微通道液冷板叠合，关键刻蚀液配比为商业秘密，具体配方比例暂不在交底中展开。', tags: ['secret'] },
+      { key: 'p1-cite', text: '背景技术可参考在先公开 CN115842100A 与 ZL2020101234567 的均热结构。', tags: ['citation'] },
+      { key: 'p1-eff', text: '初步实测结温较对照方案下降约 8℃。' },
+    ], { authorId: 5, authorName: '王工', authorRole: 'client_admin', summary: '客户提交初版交底' })
+    let v2 = await addDraftVersion(1, 'technical_disclosure', 2, [
+      { key: 'p1-bg', text: '本发明涉及高功率芯片的散热结构，旨在解决现有均热板热阻偏高、均温性差的问题。' },
+      { key: 'p1-core', text: '核心结构为石墨烯复合均热层与微通道液冷板叠合，关键刻蚀液配比为商业秘密，具体配方比例暂不在交底中展开。', tags: ['secret'] },
+      { key: 'p1-cite', text: '背景技术可参考在先公开 CN115842100A 与 ZL2020101234567 的均热结构。', tags: ['citation'] },
+      { key: 'p1-eff', text: '初步实测结温较对照方案下降约 8℃。' },
+    ], { authorId: 2, authorName: '李慕华', authorRole: 'agent', parent: v1, summary: '代理人补充技术问题表述' })
+    let v3 = await addDraftVersion(1, 'technical_disclosure', 3, [
+      { key: 'p1-bg', text: '本发明涉及高功率芯片的散热结构，旨在解决现有均热板热阻偏高、均温性差的问题。' },
+      { key: 'p1-core', text: '核心结构为石墨烯复合均热层与微通道液冷板叠合，界面采用低温烧结纳米银层；关键刻蚀液配比为商业秘密，具体配方比例暂不在交底中展开。', tags: ['secret'] },
+      { key: 'p1-cite', text: '背景技术可参考在先公开 CN115842100A 与 ZL2020101234567 的均热结构。', tags: ['citation'] },
+      { key: 'p1-eff', text: '初步实测结温较对照方案下降约 8℃，三次重复实验波动在 ±0.5℃ 内。' },
+    ], { authorId: 5, authorName: '王工', authorRole: 'client_admin', parent: v1, mergedFrom: v2, summary: '客户补充实验数据（与代理人 v2 自动合并）' })
+    await d.query('UPDATE drafts SET current_version_id = ?, updated_at = ? WHERE id = ?', [v3, now, draftIds['1:technical_disclosure']])
+
+    // 1 号案：权利要求草稿编辑中（代理人侧文书，客户只读脱敏版）
+    await ensureDraft(1, 'claims')
+    let c1 = await addDraftVersion(1, 'claims', 1, [
+      { key: 'c1-1', text: '1. 一种芯片散热结构，包括石墨烯复合均热层与微通道液冷板，其特征在于二者之间设有低温烧结纳米银界面层。' },
+    ], { authorId: 2, authorName: '李慕华', authorRole: 'agent', summary: '独立权利要求初稿' })
+    await d.query('UPDATE drafts SET current_version_id = ? WHERE id = ?', [c1, draftIds['1:claims']])
+
+    // 3 号案（受理）：技术交底书草稿全部作废 → 「草稿全部作废」空态样例
+    await ensureDraft(3, 'technical_disclosure')
+    let x1 = await addDraftVersion(3, 'technical_disclosure', 1, [
+      { key: 'p3-1', text: '本方案为晶圆清洗装置，初版拟采用单片旋转喷淋结构。' },
+    ], { authorId: 2, authorName: '李慕华', authorRole: 'agent', summary: '初版', status: '已作废', voidReason: '技术路线与客户最新确认的批式清洗不符，整体作废重来。' })
+    await addDraftVersion(3, 'technical_disclosure', 2, [
+      { key: 'p3-2', text: '改为批式槽式清洗，配兆波换能器。' },
+    ], { authorId: 2, authorName: '李慕华', authorRole: 'agent', parent: x1, summary: '第二版', status: '已作废', voidReason: '客户口头补充信息有误，待重新现场调研后从 v1 重开。' })
+    await d.query('UPDATE drafts SET current_version_id = NULL, updated_at = ? WHERE id = ?', [now, draftIds['3:technical_disclosure']])
+
+    // 5 号案：交底书原件刚上传、仍在解析，尚无任何文本版本 → 「附件解析中」空态样例
+    await ensureDraft(5, 'technical_disclosure')
+    const parsingPdf = Buffer.from(`%PDF-1.4\n% 客户刚上传的交底原件（演示解析中占位）\n`.padEnd(600, 'p'), 'utf8')
+    await seedAttachment(5, 'technical_disclosure', { name: '蓝湾-抗体偶联交底书-原稿.pdf', body: parsingPdf, parseStatus: '解析中' })
+    // 6 号案：三类文书均无任何草稿（自然落入「还没有草稿」空态，种子不再插数据）
+
+    // 11 号案（已授权）：说明书已定稿 + 对象存储附件原件 + 定稿提交期限（官文同口径）
+    await ensureDraft(11, 'specification')
+    let s1 = await addDraftVersion(11, 'specification', 1, [
+      { key: 's11-1', text: '一种机械臂末端夹具，包括夹座、平行夹爪与浮动补偿组件。' },
+      { key: 's11-2', text: '浮动补偿组件包括直线导轨与预压弹簧，容许夹爪在夹持方向产生 2mm 浮动量。' },
+    ], { authorId: 2, authorName: '李慕华', authorRole: 'agent', summary: '说明书定稿文本' })
+    const specPdf = Buffer.from(`%PDF-1.4\n% 定稿说明书原件（演示占位）\n机械臂末端夹具 说明书定稿\n`.padEnd(1200, 'x'), 'utf8')
+    const att = await seedAttachment(11, 'specification', { name: '机械臂末端夹具-说明书定稿.pdf', body: specPdf, parseStatus: '就绪', pages: 18 })
+    // 定稿时把版本指向当时的附件文件
+    await d.query('UPDATE draft_versions SET attachment_file_id = ? WHERE id = ?', [att.fileId, s1])
+    // 定稿提交期限：自授权办登官文收到日起、法定顺延口径（与官文期限同一引擎算出）
+    const grant = (await d.query("SELECT dispatch_date, receive_date FROM official_docs WHERE case_id = 11 AND doc_type LIKE '授权通知书%' LIMIT 1"))[0]
+    let specDlId = null
+    if (grant) {
+      const r = computeDueDate({ start_date: grant.receive_date || addDays(grant.dispatch_date, 15), duration_days: 60, day_basis: 'legal' }, cal)
+      specDlId = await d.insert(
+        `INSERT INTO deadlines (case_id, doc_id, dtype, anchor_basis, day_basis, start_date, duration_days, due_date, rolled, status, note, completed_at, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [11, null, '说明书定稿提交', 'receive', 'legal', grant.receive_date, 60, r.due_date, r.rolled ? 1 : 0, '已完成', '随《说明书定稿》定稿生成', daysAgoIso(150), now])
+    }
+    await d.query('UPDATE drafts SET status = ?, current_version_id = ?, final_version_id = ?, deadline_id = ?, finalized_at = ?, updated_at = ? WHERE id = ?',
+      ['已定稿', s1, s1, specDlId, daysAgoIso(168), now, draftIds['11:specification']])
   })
 
-  console.log(`[seed] 完成：3 家客户 / 7 个账号 / 12 件案件（十态全覆盖）/ 2026 节假日 ${holidayDates.length + WORKDAYS_2026.length} 条 / 官文与期限 / 7 条费用；代理所今日口径 ${tzToday(config.firmTz)}`)
+  // 附件对象本体入库后写对象存储（文件不入库；key 已在上面固化）
+  const storage = await getStorage()
+  for (const a of pendingAttachments) {
+    // eslint-disable-next-line no-await-in-loop
+    await storage.put(a.objectKey, a.body, { contentType: 'application/pdf' })
+  }
+
+  console.log(`[seed] 完成：3 家客户 / 7 个账号 / 12 件案件（十态全覆盖）/ 2026 节假日 ${holidayDates.length + WORKDAYS_2026.length} 条 / 官文与期限 / 7 条费用 / 撰稿版本链与脱敏规则 v1 / 定稿附件 ${pendingAttachments.length} 份（对象存储）；代理所今日口径 ${tzToday(config.firmTz)}`)
   return true
 }
